@@ -142,6 +142,7 @@ class Config:
     timeout_ms: int = 20_000
     user_agent: str = DEFAULT_USER_AGENT
     artifact_dir: Path = Path("artifacts")
+    submit_delay_seconds: int = 0
 
 
 @dataclass(slots=True)
@@ -190,13 +191,18 @@ def _split_list(raw: str | None) -> list[str]:
     return [item.strip() for item in (raw or "").split(",") if item.strip()]
 
 
-def load_config(cli_urls: Sequence[str] = (), headed: bool | None = None) -> Config:
+def load_config(
+    cli_urls: Sequence[str] = (),
+    headed: bool | None = None,
+    submit_delay_seconds: int | None = None,
+) -> Config:
     """
     Muat konfigurasi dari .env, lalu timpa dengan argumen CLI bila tersedia.
 
     Args:
         cli_urls: Target attendance dari flag --url (cmid atau URL penuh).
         headed: True memaksa browser tampil, None mengikuti HEADLESS_MODE.
+        submit_delay_seconds: Jeda detik sebelum submit (override SUBMIT_DELAY_SECONDS).
 
     Raises:
         SystemExit: bila kredensial wajib atau target attendance tidak ditemukan.
@@ -220,6 +226,9 @@ def load_config(cli_urls: Sequence[str] = (), headed: bool | None = None) -> Con
     if not targets:
         raise SystemExit("Tidak ada target attendance. Set SPADA_ATTENDANCE_URLS atau pakai --url.")
 
+    delay_env = int(os.getenv("SUBMIT_DELAY_SECONDS", "60"))
+    delay = submit_delay_seconds if submit_delay_seconds is not None else delay_env
+
     return Config(
         username=required["SPADA_USERNAME"],
         password=required["SPADA_PASSWORD"],
@@ -231,6 +240,7 @@ def load_config(cli_urls: Sequence[str] = (), headed: bool | None = None) -> Con
         timeout_ms=int(os.getenv("STEP_TIMEOUT_MS", "20000")),
         user_agent=os.getenv("USER_AGENT", "").strip() or DEFAULT_USER_AGENT,
         artifact_dir=Path(os.getenv("ARTIFACT_DIR", "artifacts")),
+        submit_delay_seconds=delay,
     )
 
 
@@ -487,6 +497,10 @@ class SpadaBot:
             if await self._already_present(page):
                 return AttendanceResult(course, "already", "Absensi sudah tercatat Hadir")
 
+            if self.config.submit_delay_seconds > 0:
+                log(f"Menunggu spare waktu {self.config.submit_delay_seconds}s sebelum submit ({course}) ...")
+                await asyncio.sleep(self.config.submit_delay_seconds)
+
             if not await self._fill_present(page):
                 await self.screenshot(f"no-radio-{stamp}.png")
                 return AttendanceResult(course, "failed", "Opsi 'Hadir/Present' tidak ditemukan")
@@ -711,7 +725,8 @@ async def run(config: Config) -> int:
         for target in config.attendance_targets:
             result = await bot.submit_attendance(target)
             results.append(result)
-            await notifier.send(format_result(result))
+            if result.status in {"success", "failed"}:
+                await notifier.send(format_result(result))
     except (SpadaError, PlaywrightError) as exc:
         reason = clean_text(str(exc).splitlines()[0])[:180]
         log(f"! {reason}")
@@ -742,10 +757,20 @@ def main() -> int:
     parser.add_argument(
         "--headed", action="store_true", help="Tampilkan jendela browser (override HEADLESS_MODE)"
     )
+    parser.add_argument(
+        "--delay",
+        type=int,
+        default=None,
+        help="Jeda detik sebelum submit (override SUBMIT_DELAY_SECONDS)",
+    )
     args = parser.parse_args()
 
     try:
-        config = load_config(cli_urls=args.urls, headed=True if args.headed else None)
+        config = load_config(
+            cli_urls=args.urls,
+            headed=True if args.headed else None,
+            submit_delay_seconds=args.delay,
+        )
     except SystemExit as exc:
         print(exc, file=sys.stderr)
         return 2

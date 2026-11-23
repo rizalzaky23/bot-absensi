@@ -6,3 +6,4 @@ venv/
 artifacts/
 *.log
 .DS_Store
+.artifacts-test/
