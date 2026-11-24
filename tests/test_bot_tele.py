@@ -172,6 +172,10 @@ class TestTelegramBotDaemon(unittest.IsolatedAsyncioTestCase):
             {"message": {"chat": {"id": "777"}, "from": {"username": "budi"}, "text": "/bayar mingguan"}}
         )
         self.assertIn("Tagihan #", mock_send.call_args[0][1])
+        mock_photo.assert_awaited_once()
+        self.assertEqual(mock_photo.call_args[0][0], "777")
+        self.assertEqual(mock_photo.call_args[0][1].name, "qris.jpg")
+        self.assertIn("RZF STORE, KLTN SLT", mock_photo.call_args[0][2])
 
         await self.daemon.process_update(
             {
@@ -182,7 +186,7 @@ class TestTelegramBotDaemon(unittest.IsolatedAsyncioTestCase):
                 }
             }
         )
-        mock_photo.assert_awaited_once()
+        self.assertEqual(mock_photo.await_count, 2)
         self.assertEqual(mock_photo.call_args[0][0], "123456789")
         self.assertEqual(mock_photo.call_args[0][1], "PHOTO_123")
         self.assertIn("/approve 777", mock_photo.call_args[0][2])

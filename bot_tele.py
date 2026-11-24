@@ -55,10 +55,15 @@ class TelegramBotDaemon:
         self._user_locks: dict[str, asyncio.Lock] = {}
         self._browser_sem = asyncio.Semaphore(int(os.getenv("MAX_CONCURRENT_BROWSERS", "2")))
 
-        self.payment_info = os.getenv(
-            "PAYMENT_INFO", "Transfer BCA 1234567890 a.n. Admin / QRIS"
-        ).strip()
-        self.payment_qr_path = os.getenv("PAYMENT_QR_PATH", "").strip()
+        default_qr = Path(__file__).resolve().parent / "assets" / "qris.jpg"
+        self.payment_info = (
+            os.getenv("PAYMENT_INFO", "").strip()
+            or "QRIS *RZF STORE, KLTN SLT* (NMID: `ID1024339160201`)\n"
+            "Terima pembayaran QRIS dari e-wallet & m-banking mana saja."
+        )
+        self.payment_qr_path = os.getenv("PAYMENT_QR_PATH", "").strip() or (
+            str(default_qr) if default_qr.is_file() else ""
+        )
         self.user_gap_min = float(os.getenv("USER_GAP_MIN_SECONDS", "15"))
         self.user_gap_max = float(os.getenv("USER_GAP_MAX_SECONDS", "45"))
         self.target_gap_min = float(os.getenv("TARGET_GAP_MIN_SECONDS", "2"))
@@ -378,7 +383,9 @@ class TelegramBotDaemon:
         )
         if self.payment_qr_path and Path(self.payment_qr_path).is_file():
             await self.send_photo(
-                chat_id, Path(self.payment_qr_path), "QRIS Pembayaran Bot Absen"
+                chat_id,
+                Path(self.payment_qr_path),
+                f"QRIS Pembayaran Bot Absen — RZF STORE, KLTN SLT\nNominal: *{amount_str}* ({payment['label']})",
             )
 
     async def _handle_payment_proof(
