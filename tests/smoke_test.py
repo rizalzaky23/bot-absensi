@@ -382,6 +382,29 @@ async def main_test() -> int:
     result = await run_scenario(build_mock(REAL_SPADA_TODAY_DONE_PAGE), ["813469"], tmp)
     check("hari ini Present terdeteksi already", result.status == "already", f"status={result.status}")
 
+    print("\n10. Filter sesi jadwal hari ini (get_today_sessions)")
+    bot = SpadaBot(make_config(tmp, ["813469"]))
+    try:
+        await bot.start()
+        assert bot.page is not None
+        for label, html, expected in [
+            ("sesi terbuka hari ini", REAL_SPADA_OPEN_PAGE, "open"),
+            ("sesi hari ini belum dibuka", REAL_SPADA_PAST_ONLY_NOT_OPEN_PAGE, "not_open"),
+            ("sesi hari ini sudah hadir", REAL_SPADA_TODAY_DONE_PAGE, "already"),
+        ]:
+            await bot.page.set_content(html)
+            sessions = await bot.get_today_sessions(bot.page)
+            check(
+                f"get_today_sessions -> {label}",
+                len(sessions) == 1 and sessions[0][0] == expected,
+                str(sessions),
+            )
+        await bot.page.set_content(ATTENDANCE_CLOSED_PAGE)
+        sessions = await bot.get_today_sessions(bot.page)
+        check("get_today_sessions mengabaikan tanggal bukan hari ini", sessions == [], str(sessions))
+    finally:
+        await bot.close()
+
     print()
     if failures:
         print(f"{len(failures)} test GAGAL: {failures}")

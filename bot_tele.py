@@ -201,10 +201,11 @@ class TelegramBotDaemon:
             return
 
         async with RUN_LOCK:
-            await self.send_message(chat_id, "🔍 *Mengecek sesi presensi SPADA hari ini...*")
+            await self.send_message(chat_id, "🔍 *Mengecek jadwal presensi SPADA hari ini...*")
             cfg = load_config(submit_delay_seconds=0)
             bot = SpadaBot(cfg)
             open_sessions: list[str] = []
+            upcoming: list[str] = []
             already_done: list[str] = []
 
             try:
@@ -216,28 +217,39 @@ class TelegramBotDaemon:
                     await bot.page.goto(url, wait_until="domcontentloaded")
                     await bot._settle()
                     cname = await guess_course_name(bot.page)
+                    if any(skip in cname.lower() for skip in cfg.skip_courses):
+                        continue
 
-                    link, row_text = await bot._find_active_session(bot.page)
-                    if link is not None:
-                        open_sessions.append(f"🟢 *{cname}* (`{target}`): Sesi Terbuka!\n  _{row_text[:80]}_")
-                    elif await bot._already_present(bot.page):
-                        already_done.append(f"☑️ *{cname}* (`{target}`): Sudah Hadir")
+                    for status, schedule in await bot.get_today_sessions(bot.page):
+                        entry_head = f"*{cname}* (`{target}`)\n  _{schedule}_"
+                        if status == "open":
+                            open_sessions.append(f"🟢 {entry_head}")
+                        elif status == "already":
+                            already_done.append(f"☑️ {entry_head}")
+                        else:
+                            upcoming.append(f"⏳ {entry_head}")
             except Exception as exc:
                 await self.send_message(chat_id, f"⚠️ Terjadi kesalahan saat cek sesi: {exc}")
                 return
             finally:
                 await bot.close()
 
-            report = ["📊 *Hasil Pengecekan Sesi SPADA:*"]
-            if open_sessions:
-                report.append("\n*Sesi Siap Diisi:*")
-                report.extend(open_sessions)
+            report = [
+                "📊 *Jadwal Presensi SPADA Hari Ini*",
+                f"• *Tanggal:* {now_local():%d %B %Y} (WIB)",
+            ]
+            if not (open_sessions or upcoming or already_done):
+                report.append("\n_Tidak ada jadwal presensi pada hari ini._")
             else:
-                report.append("\n_Tidak ada sesi yang sedang terbuka saat ini._")
-
-            if already_done:
-                report.append("\n*Sudah Terisi Hari Ini:*")
-                report.extend(already_done)
+                if open_sessions:
+                    report.append("\n*Sesi Siap Diisi:*")
+                    report.extend(open_sessions)
+                if upcoming:
+                    report.append("\n*Belum Dibuka / Ditutup:*")
+                    report.extend(upcoming)
+                if already_done:
+                    report.append("\n*Sudah Terisi Hari Ini:*")
+                    report.extend(already_done)
 
             await self.send_message(chat_id, "\n".join(report))
 

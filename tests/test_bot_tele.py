@@ -54,11 +54,11 @@ class TestTelegramBotDaemon(unittest.IsolatedAsyncioTestCase):
         text = mock_send.call_args[0][1]
         self.assertIn("DIAKTIFKAN", text)
 
-    @patch.object(bot_tele, "guess_course_name", new_callable=AsyncMock, return_value="Pengantar SC SPK")
+    @patch.object(bot_tele, "guess_course_name", new_callable=AsyncMock)
     @patch.object(bot_tele, "SpadaBot")
     @patch.object(bot_tele.TelegramBotDaemon, "send_message", new_callable=AsyncMock)
-    async def test_handle_cek_prioritizes_open_session_over_already_present(
-        self, mock_send, mock_bot_cls, _mock_guess
+    async def test_handle_cek_shows_only_today_courses(
+        self, mock_send, mock_bot_cls, mock_guess
     ):
         mock_bot = MagicMock()
         mock_bot.page = MagicMock()
@@ -67,16 +67,33 @@ class TestTelegramBotDaemon(unittest.IsolatedAsyncioTestCase):
         mock_bot.login = AsyncMock()
         mock_bot.close = AsyncMock()
         mock_bot._settle = AsyncMock()
-        mock_bot._find_active_session = AsyncMock(return_value=(MagicMock(), "Tue 24 Nov 2026 Submit attendance"))
-        mock_bot._already_present = AsyncMock(return_value=True)
+        mock_guess.side_effect = [
+            "Matkul Terbuka",
+            "Matkul Belum Buka",
+            "Matkul Sudah Hadir",
+            "Matkul Besok",
+        ]
+        mock_bot.get_today_sessions = AsyncMock(
+            side_effect=[
+                [("open", "Tue 24 Nov 2026 12:30PM - 2:15PM")],
+                [("not_open", "Tue 24 Nov 2026 3PM - 6PM")],
+                [("already", "Tue 24 Nov 2026 08:00AM - 09:40AM")],
+                [],
+            ]
+        )
         mock_bot_cls.return_value = mock_bot
 
-        os.environ["SPADA_ATTENDANCE_URLS"] = "813469"
+        os.environ["SPADA_ATTENDANCE_URLS"] = "101,102,103,104"
         await self.daemon.handle_cek("123456789")
 
         report = mock_send.call_args_list[-1][0][1]
-        self.assertIn("Sesi Terbuka!", report)
-        self.assertNotIn("Sudah Hadir", report)
+        self.assertIn("*Sesi Siap Diisi:*", report)
+        self.assertIn("Matkul Terbuka", report)
+        self.assertIn("*Belum Dibuka / Ditutup:*", report)
+        self.assertIn("Matkul Belum Buka", report)
+        self.assertIn("*Sudah Terisi Hari Ini:*", report)
+        self.assertIn("Matkul Sudah Hadir", report)
+        self.assertNotIn("Matkul Besok", report)
 
 if __name__ == "__main__":
     unittest.main()

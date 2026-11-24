@@ -675,6 +675,56 @@ class SpadaBot:
                 return True
         return False
 
+    async def get_today_sessions(
+        self, page: Page, target_date: date | None = None
+    ) -> list[tuple[str, str]]:
+        """
+        Kembalikan daftar sesi yang dijadwalkan pada `target_date` (default: hari ini WIB).
+
+        Setiap item berupa `(status, jadwal)` dengan status `"open"`, `"already"`, atau `"not_open"`.
+        """
+        check_date = target_date or now_local().date()
+        rows = await self._session_rows(page)
+        if rows is None:
+            return []
+
+        sessions: list[tuple[str, str]] = []
+        for index in range(await rows.count()):
+            row = rows.nth(index)
+            if await row.locator("th").count() or await row.locator("a[href*='take.php']").count():
+                continue
+            text = clean_text(await row.text_content())
+            if not text or text.lower().startswith(("date", "tanggal")):
+                continue
+            if _extract_row_date(text) != check_date:
+                continue
+
+            date_loc = row.locator("td.datecol").first
+            schedule = (
+                clean_text(await date_loc.text_content())
+                if await date_loc.count()
+                else text[:80]
+            )
+            if await first_visible(row, SEL_SUBMIT_LINK, timeout=0.1):
+                sessions.append(("open", schedule))
+                continue
+
+            status_loc = row.locator(", ".join(SEL_STATUS_CELL)).first
+            status_text = (
+                clean_text(await status_loc.text_content())
+                if await status_loc.count()
+                else text
+            )
+            if (
+                status_text
+                and PRESENT_PATTERN.search(status_text)
+                and not NOT_OPEN_PATTERN.search(status_text)
+            ):
+                sessions.append(("already", schedule))
+            else:
+                sessions.append(("not_open", schedule))
+        return sessions
+
     async def _fill_present(self, page: Page) -> bool:
         """
         Pilih radio "Hadir/Present".
