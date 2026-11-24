@@ -136,6 +136,7 @@ class TelegramBotDaemon:
                 continue
 
             async with RUN_LOCK:
+                bot: SpadaBot | None = None
                 try:
                     cfg = load_config()
                     bot = SpadaBot(cfg)
@@ -147,9 +148,6 @@ class TelegramBotDaemon:
                         assert bot.page is not None
                         await bot.page.goto(url, wait_until="domcontentloaded")
                         await bot._settle()
-
-                        if await bot._already_present(bot.page):
-                            continue
 
                         link, row_text = await bot._find_active_session(bot.page)
                         if link is None:
@@ -175,10 +173,11 @@ class TelegramBotDaemon:
                                     target_chat,
                                     TelegramNotifier.format_failure(result.course, result.timestamp, result.reason)
                                 )
-
-                    await bot.close()
                 except Exception as exc:
                     log(f"! Error pada auto-watcher cycle: {exc}")
+                finally:
+                    if bot is not None:
+                        await bot.close()
 
     async def handle_list(self, chat_id: str | int) -> None:
         """Tampilkan daftar target attendance."""
@@ -218,13 +217,11 @@ class TelegramBotDaemon:
                     await bot._settle()
                     cname = await guess_course_name(bot.page)
 
-                    if await bot._already_present(bot.page):
-                        already_done.append(f"☑️ *{cname}* (`{target}`): Sudah Hadir")
-                        continue
-
                     link, row_text = await bot._find_active_session(bot.page)
                     if link is not None:
                         open_sessions.append(f"🟢 *{cname}* (`{target}`): Sesi Terbuka!\n  _{row_text[:80]}_")
+                    elif await bot._already_present(bot.page):
+                        already_done.append(f"☑️ *{cname}* (`{target}`): Sudah Hadir")
             except Exception as exc:
                 await self.send_message(chat_id, f"⚠️ Terjadi kesalahan saat cek sesi: {exc}")
                 return

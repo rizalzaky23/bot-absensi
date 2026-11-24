@@ -88,11 +88,94 @@ ATTENDANCE_CLOSED_PAGE = """
 </body></html>
 """
 
-ATTENDANCE_DONE_PAGE = """
+_MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+_TODAY = main.now_local().date()
+TODAY_STR = f"{_TODAY.day} {_MONTHS[_TODAY.month - 1]} {_TODAY.year}"
+
+ATTENDANCE_DONE_PAGE = f"""
 <html><body>
 <h1>Keamananpriced Software Engineering</h1>
 <table class="generaltable">
-<tr><td>29 Sep 2026</td><td>16:00</td><td class="attendancestatus">Present</td><td></td></tr>
+<tr><td>{TODAY_STR}</td><td>16:00</td><td class="attendancestatus">Present</td><td></td></tr>
+</table>
+</body></html>
+"""
+
+REAL_SPADA_OPEN_PAGE = f"""
+<html><body>
+<h1>Pengantar SC SPK</h1>
+<table class="generaltable attwidth boxaligncenter">
+<thead><tr><th>Date</th><th>Description</th><th>Status</th><th>Points</th><th>Remarks</th></tr></thead>
+<tbody>
+<tr>
+  <td class="datecol cell c0"><nobr>Tue 17 Nov 2026</nobr> <nobr>12:30PM - 2:15PM</nobr></td>
+  <td class="desccol cell c1">Regular class session</td>
+  <td class="statuscol cell c2">Present</td>
+  <td class="pointscol cell c3">2 / 2</td>
+  <td class="remarkscol cell c4">Self-recorded</td>
+</tr>
+<tr>
+  <td class="datecol cell c0"><nobr>{TODAY_STR}</nobr> <nobr>12:30PM - 2:15PM</nobr></td>
+  <td class="desccol cell c1">Regular class session</td>
+  <td class="statuscol cell c2"><a href="https://spada.upnyk.ac.id/mod/attendance/attendance.php?sessid=999&amp;sesskey=abc">Submit attendance</a></td>
+  <td class="pointscol cell c3">? / 2</td>
+  <td class="remarkscol cell c4"></td>
+</tr>
+</tbody></table>
+</body></html>
+"""
+
+REAL_SPADA_PAST_ONLY_NOT_OPEN_PAGE = f"""
+<html><body>
+<h1>Rekayasa Kebutuhan Perangkat Lunak</h1>
+<table class="generaltable attwidth boxaligncenter">
+<thead><tr><th>Date</th><th>Description</th><th>Status</th><th>Points</th><th>Remarks</th></tr></thead>
+<tbody>
+<tr>
+  <td class="datecol cell c0"><nobr>Tue 17 Nov 2026</nobr> <nobr>3PM - 6PM</nobr></td>
+  <td class="desccol cell c1">Regular class session</td>
+  <td class="statuscol cell c2">Present</td>
+  <td class="pointscol cell c3">2 / 2</td>
+  <td class="remarkscol cell c4">Self-recorded</td>
+</tr>
+<tr>
+  <td class="datecol cell c0"><nobr>{TODAY_STR}</nobr> <nobr>3PM - 6PM</nobr></td>
+  <td class="desccol cell c1">Regular class session</td>
+  <td class="statuscol cell c2">?</td>
+  <td class="pointscol cell c3">? / 2</td>
+  <td class="remarkscol cell c4"></td>
+</tr>
+</tbody></table>
+</body></html>
+"""
+
+REAL_SPADA_TODAY_DONE_PAGE = REAL_SPADA_PAST_ONLY_NOT_OPEN_PAGE.replace(
+    '<td class="statuscol cell c2">?</td>',
+    '<td class="statuscol cell c2">Present</td>',
+)
+
+REAL_SPADA_SUBMIT_FORM = """
+<html><body>
+<div id="region-main">
+  <h1>Pengantar SC SPK</h1>
+  <form method="post" action="https://spada.upnyk.ac.id/mod/attendance/attendance.php">
+    <input type="hidden" name="sessid" value="999">
+    <input type="hidden" name="sesskey" value="abc">
+    <label><input type="radio" name="status" value="14831"> Absent</label>
+    <label><input type="radio" name="status" value="14830"> Late</label>
+    <label><input type="radio" name="status" value="14829"> Present</label>
+    <input type="submit" name="submitbutton" value="Save changes">
+  </form>
+</div>
+</body></html>
+"""
+
+REAL_SPADA_SUBMIT_DONE = f"""
+<html><body>
+<div class="alert alert-success">Your attendance in this session has been recorded.</div>
+<h1>Pengantar SC SPK</h1>
+<table class="generaltable attwidth boxaligncenter">
+<tr><td class="datecol">{TODAY_STR}</td><td class="statuscol">Present</td></tr>
 </table>
 </body></html>
 """
@@ -271,6 +354,33 @@ async def main_test() -> int:
         == "https://x.test/mod/attendance/view.php?id=1",
     )
     check("session_reason kosong", "No active session" in main.session_reason(""))
+    check("now_local memakai WIB (+07:00)", main.now_local().utcoffset().total_seconds() == 7 * 3600)
+
+    print("\n9. Regresi HTML SPADA asli (riwayat Present + sesi hari ini terbuka / ? / sudah)")
+    posted_bodies: list[str] = []
+
+    async def real_spada_handler(route):
+        url, method = route.request.url, route.request.method
+        if url.endswith("/login/index.php"):
+            return await fulfill(route, DASHBOARD_PAGE if method == "POST" else LOGIN_PAGE)
+        if "/mod/attendance/attendance.php" in url and method == "POST":
+            posted_bodies.append(route.request.post_data or "")
+            return await fulfill(route, REAL_SPADA_SUBMIT_DONE)
+        if "/mod/attendance/attendance.php" in url:
+            return await fulfill(route, REAL_SPADA_SUBMIT_FORM)
+        if "/mod/attendance/view.php" in url:
+            return await fulfill(route, REAL_SPADA_OPEN_PAGE)
+        return await fulfill(route, DASHBOARD_PAGE)
+
+    result = await run_scenario(real_spada_handler, ["813469"], tmp)
+    check("sesi terbuka tetap diisi meski minggu lalu Present", result.status == "success", f"status={result.status} reason={result.reason}")
+    check("memilih radio Present berdasar label (status=14829)", bool(posted_bodies) and "status=14829" in posted_bodies[0], str(posted_bodies))
+
+    result = await run_scenario(build_mock(REAL_SPADA_PAST_ONLY_NOT_OPEN_PAGE), ["805832"], tmp)
+    check("riwayat minggu lalu tidak dianggap sudah absen hari ini", result.status == "not_open", f"status={result.status} reason={result.reason}")
+
+    result = await run_scenario(build_mock(REAL_SPADA_TODAY_DONE_PAGE), ["813469"], tmp)
+    check("hari ini Present terdeteksi already", result.status == "already", f"status={result.status}")
 
     print()
     if failures:

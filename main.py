@@ -24,9 +24,10 @@ import re
 import sys
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 from dotenv import load_dotenv
@@ -54,20 +55,77 @@ DEFAULT_USER_AGENT = (
     "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 )
 TIMEZONE = "Asia/Jakarta"  # WIB
+try:
+    WIB_TZ = ZoneInfo(TIMEZONE)
+except ZoneInfoNotFoundError:
+    WIB_TZ = timezone(timedelta(hours=7))
 
 _UPPER = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+_MONTH_MAP = {
+    "jan": 1,
+    "feb": 2,
+    "mar": 3,
+    "apr": 4,
+    "may": 5,
+    "mei": 5,
+    "jun": 6,
+    "jul": 7,
+    "aug": 8,
+    "agu": 8,
+    "agt": 8,
+    "sep": 9,
+    "oct": 10,
+    "okt": 10,
+    "nov": 11,
+    "dec": 12,
+    "des": 12,
+}
 
 
 def xpath_text_ci(tag: str, keyword: str) -> str:
-    """Bangun XPath case-insensitive untuk mencari `keyword` di teks sebuah elemen."""
+    """Bangun XPath case-insensitive relatif untuk mencari `keyword` di teks elemen."""
     return (
-        f"//{tag}[contains(translate(., '{_UPPER}', '{_UPPER.lower()}'), '{keyword}')]"
+        f"xpath=.//{tag}[contains(translate(., '{_UPPER}', '{_UPPER.lower()}'), '{keyword}')]"
     )
+
+
+def _extract_row_date(text: str) -> date | None:
+    """Ambil tanggal sesi dari teks baris tabel Moodle (EN/ID)."""
+    for m in re.finditer(r"\b(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})\b", text):
+        month = _MONTH_MAP.get(m.group(2)[:3].lower())
+        if month:
+            try:
+                return date(int(m.group(3)), month, int(m.group(1)))
+            except ValueError:
+                return None
+    if m := re.search(r"\b(\d{4})-(\d{2})-(\d{2})\b", text):
+        try:
+            return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        except ValueError:
+            return None
+    if m := re.search(r"\b(\d{1,2})[./](\d{1,2})[./](\d{2,4})\b", text):
+        year = int(m.group(3))
+        if year < 100:
+            year += 2000
+        try:
+            return date(year, int(m.group(2)), int(m.group(1)))
+        except ValueError:
+            return None
+    return None
+
 
 # Pola teks status absensi (Indonesia & Inggris).
 PRESENT_PATTERN = re.compile(r"\b(present|hadir|terlambat|late)\b", re.IGNORECASE)
+RADIO_PRESENT_PATTERN = re.compile(r"\b(present|hadir)\b", re.IGNORECASE)
+RADIO_NEGATIVE_PATTERN = re.compile(r"\b(tidak|not|absent|alpha|alpa|absen)\b", re.IGNORECASE)
+SUCCESS_BANNER_PATTERN = re.compile(
+    r"\b(present|hadir|terlambat|late|recorded|tercatat|berhasil|success|saved|tersimpan)\b",
+    re.IGNORECASE,
+)
 SUBMIT_PATTERN = re.compile(
-    r"(submit\s*kehadiran|submit\s*attendance|isi\s*kehadiran|absen)", re.IGNORECASE
+    r"(submit\s*kehadiran|submit\s*attendance|ajukan\s*kehadiran|kirim\s*kehadiran|"
+    r"isi\s*kehadiran|record\s*attendance)",
+    re.IGNORECASE,
 )
 NOT_OPEN_PATTERN = re.compile(
     r"(not\s*yet\s*open|belum\s*(dibuka|mulai)|closed|sudah\s*tutup|selesai)", re.IGNORECASE
@@ -97,19 +155,29 @@ SEL_SESSION_ROW = [
     "//table[contains(@class,'generaltable')]//tr",
 ]
 SEL_SUBMIT_LINK = [
+    "a[href*='attendance.php'][href*='sessid']",
     "a[href*='attendance_submit']",
+    xpath_text_ci("a", "submit attendance"),
+    xpath_text_ci("a", "submit kehadiran"),
+    xpath_text_ci("a", "ajukan kehadiran"),
+    xpath_text_ci("a", "isi kehadiran"),
     xpath_text_ci("a", "kehadiran"),
     xpath_text_ci("a", "submit"),
 ]
-SEL_STATUS_CELL = ["td.attendancestatus", "td.attendance-status"]
+SEL_STATUS_CELL = ["td.statuscol", "td.attendancestatus", "td.attendance-status"]
 SEL_PRESENCE_RADIO = [
+    "input[type='radio'][name='status']",
     "input[type='radio'][name='presence']",
     "input[type='radio'][name='attendance']",
+    "form input[type='radio']",
     "input[type='radio']",
 ]
 SEL_SAVE_BUTTON = [
+    "#region-main input[name='submitbutton']",
     "input[name='submitbutton']",
     "button[name='submitbutton']",
+    "#region-main button[type='submit']",
+    "#region-main input[type='submit']",
     "button[type='submit']",
     "input[type='submit']",
 ]
@@ -152,7 +220,7 @@ class AttendanceResult:
     course: str
     status: str  # success | already | not_open | failed
     reason: str = ""
-    timestamp: datetime = field(default_factory=lambda: datetime.now())
+    timestamp: datetime = field(default_factory=lambda: now_local())
 
     @property
     def ok(self) -> bool:
@@ -166,8 +234,8 @@ class AttendanceResult:
 
 
 def now_local() -> datetime:
-    """Waktu sekarang dalam zona WIB."""
-    return datetime.now().astimezone()
+    """Waktu sekarang dalam zona WIB (Asia/Jakarta)."""
+    return datetime.now(WIB_TZ)
 
 
 def log(message: str) -> None:
@@ -482,31 +550,40 @@ class SpadaBot:
             if any(skip in course.lower() for skip in self.config.skip_courses):
                 return AttendanceResult(course, "not_open", f"Diskip sesuai SKIP_COURSES: {course}")
 
-            if await self._already_present(page):
-                return AttendanceResult(course, "already", "Absensi hari ini sudah tercatat Hadir")
-
+            # Cek sesi terbuka dulu agar riwayat Present minggu lalu tidak menutupi sesi hari ini.
             link, row_text = await self._find_active_session(page)
             if link is None:
+                if await self._already_present(page):
+                    return AttendanceResult(course, "already", "Absensi hari ini sudah tercatat Hadir")
                 await self.screenshot(f"no-session-{stamp}.png")
                 return AttendanceResult(course, "not_open", session_reason(row_text))
 
+            session_date = _extract_row_date(row_text)
             log(f"Sesi aktif: {row_text or 'form submit langsung'}")
-            await link.click()
-            await self._settle()
-
-            if await self._already_present(page):
-                return AttendanceResult(course, "already", "Absensi sudah tercatat Hadir")
-
             if self.config.submit_delay_seconds > 0:
                 log(f"Menunggu spare waktu {self.config.submit_delay_seconds}s sebelum submit ({course}) ...")
                 await asyncio.sleep(self.config.submit_delay_seconds)
+
+            await link.click()
+            await self._settle()
+
+            if await first_visible(page, ["input[name='studentpassword']"], timeout=0.5):
+                await self.screenshot(f"password-{stamp}.png")
+                return AttendanceResult(course, "failed", "Sesi memerlukan password absensi dari dosen")
+
+            if not await page.locator("input[type='radio']").count():
+                verified = await self._verify(page, course, stamp, target_date=session_date)
+                if verified.status == "success":
+                    return verified
+                await self.screenshot(f"no-radio-{stamp}.png")
+                return AttendanceResult(course, "failed", "Opsi 'Hadir/Present' tidak ditemukan")
 
             if not await self._fill_present(page):
                 await self.screenshot(f"no-radio-{stamp}.png")
                 return AttendanceResult(course, "failed", "Opsi 'Hadir/Present' tidak ditemukan")
 
             await self._save_changes(page)
-            return await self._verify(page, course, stamp)
+            return await self._verify(page, course, stamp, target_date=session_date)
 
         except (PlaywrightTimeoutError, PlaywrightError) as exc:
             reason = f"Selector timeout / error browser: {str(exc).splitlines()[0][:140]}"
@@ -526,7 +603,7 @@ class SpadaBot:
         """
         for selector in SEL_SESSION_ROW:
             candidate = page.locator(selector)
-            if await candidate.count() > 1:  # > 1 karena ada baris <thead>
+            if await candidate.count() > 0:
                 return candidate
         return None
 
@@ -539,52 +616,62 @@ class SpadaBot:
             sesi aktif yang bisa diisi.
         """
         rows = await self._session_rows(page)
-        if rows is None:
-            return None, ""
-
         row_text = ""
-        for index in range(1, await rows.count()):  # lewati baris <thead>
-            row = rows.nth(index)
-            text = clean_text(await row.text_content())
-            if not text or text.lower().startswith(("date", "tanggal")):
-                continue
-            row_text = row_text or text
-            if NOT_OPEN_PATTERN.search(text):
-                continue
-            link = await first_visible(row, SEL_SUBMIT_LINK, timeout=0.4)
-            if link:
-                return link, text
+        if rows is not None:
+            for index in range(await rows.count()):
+                row = rows.nth(index)
+                if await row.locator("th").count():
+                    continue
+                text = clean_text(await row.text_content())
+                if not text or text.lower().startswith(("date", "tanggal")):
+                    continue
+                row_text = text
+                link = await first_visible(row, SEL_SUBMIT_LINK, timeout=0.4)
+                if link:
+                    return link, text
 
-        # Fallback: beberapa halaman langsung menampilkan form attendance_submit.
+        # Fallback: beberapa halaman langsung menampilkan form/link submit attendance.
         link = await first_visible(page, SEL_SUBMIT_LINK, timeout=1.0)
-        if link and SUBMIT_PATTERN.search(clean_text(await link.text_content())):
-            return link, row_text or "Form submit langsung"
+        if link:
+            link_text = clean_text(await link.text_content())
+            href = (await link.get_attribute("href")) or ""
+            is_att_href = ("attendance.php" in href and "sessid" in href) or "attendance_submit" in href
+            if is_att_href or SUBMIT_PATTERN.search(link_text):
+                return link, row_text or "Form submit langsung"
 
         return None, row_text
 
-    async def _already_present(self, page: Page) -> bool:
+    async def _already_present(self, page: Page, target_date: date | None = None) -> bool:
         """
-        True bila absensi hari ini sudah tercatat.
-
-        Dua strategi: sel status yang ditandai eksplisit, lalu fallback ke baris
-        tabel sesi yang menyebut "Hadir/Present" tapi tanpa tombol submit lagi.
+        True bila absensi pada `target_date` (default: hari ini WIB) sudah tercatat.
         """
-        for selector in SEL_STATUS_CELL:
-            cells = page.locator(selector)
-            for index in range(await cells.count()):
-                text = clean_text(await cells.nth(index).text_content())
-                if text and PRESENT_PATTERN.search(text) and not NOT_OPEN_PATTERN.search(text):
-                    return True
-
+        check_date = target_date or now_local().date()
         rows = await self._session_rows(page)
         if rows is None:
             return False
-        for index in range(1, await rows.count()):
+
+        for index in range(await rows.count()):
             row = rows.nth(index)
-            text = clean_text(await row.text_content())
-            if not text or not PRESENT_PATTERN.search(text) or NOT_OPEN_PATTERN.search(text):
+            if await row.locator("th").count():
                 continue
-            if not await row.locator("a[href*='attendance_submit']").count():
+            text = clean_text(await row.text_content())
+            if not text or text.lower().startswith(("date", "tanggal")):
+                continue
+
+            row_date = _extract_row_date(text)
+            if row_date is not None and row_date != check_date:
+                continue
+
+            if await first_visible(row, SEL_SUBMIT_LINK, timeout=0.1):
+                continue
+
+            status_loc = row.locator(", ".join(SEL_STATUS_CELL)).first
+            status_text = (
+                clean_text(await status_loc.text_content())
+                if await status_loc.count()
+                else text
+            )
+            if status_text and PRESENT_PATTERN.search(status_text) and not NOT_OPEN_PATTERN.search(status_text):
                 return True
         return False
 
@@ -592,13 +679,46 @@ class SpadaBot:
         """
         Pilih radio "Hadir/Present".
 
-        Plugin attendance Moodle memakai nilai 0 untuk Present, jadi nilai itu
-        dicoba lebih dulu; bila tidak ada, ambil radio pertama yang terlihat.
+        Coba cocokkan teks label dulu (karena Moodle memakai ID numerik acak pada
+        `name="status"`), lalu fallback ke `value="0"` atau radio pertama yang terlihat.
         """
-        radios = page.locator(SEL_PRESENCE_RADIO[0])
-        total = await radios.count()
-        if not total:
+        radios = None
+        total = 0
+        for selector in SEL_PRESENCE_RADIO:
+            candidate = page.locator(selector)
+            count = await candidate.count()
+            if count > 0:
+                radios = candidate
+                total = count
+                break
+        if radios is None or not total:
             return False
+
+        for index in range(total):
+            radio = radios.nth(index)
+            if not await radio.is_visible():
+                continue
+            try:
+                label = clean_text(
+                    await radio.evaluate(
+                        """el => {
+                            if (el.labels && el.labels.length) return el.labels[0].textContent;
+                            const lbl = el.closest('label');
+                            if (lbl) return lbl.textContent;
+                            return el.parentElement ? el.parentElement.textContent : '';
+                        }"""
+                    )
+                )
+            except PlaywrightError:
+                label = ""
+            if (
+                label
+                and RADIO_PRESENT_PATTERN.search(label)
+                and not RADIO_NEGATIVE_PATTERN.search(label)
+                and await self._check(radio)
+            ):
+                log("Memilih status Hadir/Present")
+                return True
 
         for index in range(total):
             radio = radios.nth(index)
@@ -632,13 +752,15 @@ class SpadaBot:
             await page.keyboard.press("Enter")
         await self._settle()
 
-    async def _verify(self, page: Page, course: str, stamp: str) -> AttendanceResult:
+    async def _verify(
+        self, page: Page, course: str, stamp: str, target_date: date | None = None
+    ) -> AttendanceResult:
         """Pastikan absensi benar-benar tercatat setelah tombol simpan ditekan."""
         banner = await first_visible(page, SEL_SUCCESS_BANNER, timeout=2.0)
-        if banner and PRESENT_PATTERN.search(clean_text(await banner.text_content())):
+        if banner and SUCCESS_BANNER_PATTERN.search(clean_text(await banner.text_content())):
             return AttendanceResult(course, "success", "Dikonfirmasi banner Moodle")
 
-        if await self._already_present(page):
+        if await self._already_present(page, target_date=target_date):
             return AttendanceResult(course, "success", "Status berubah menjadi Hadir/Present")
 
         await self.screenshot(f"unverified-{stamp}.png")
