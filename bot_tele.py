@@ -539,10 +539,21 @@ class TelegramBotDaemon:
             bot = SpadaBot(cfg)
             results: list[AttendanceResult] = []
             notifier = TelegramNotifier(self.token, chat_id)
+
+            async def _notify_courses_found(total: int) -> None:
+                est = max(5, total * 3)
+                await self.send_message(
+                    chat_id,
+                    f"🔎 *Login SPADA berhasil!*\n"
+                    f"Ditemukan *{total} mata kuliah*. Sedang memindai modul absensi (estimasi ~{est} detik)...",
+                )
+
             try:
                 await bot.start()
                 await bot.login()
-                discovered = await bot.discover_attendance_targets()
+                discovered = await bot.discover_attendance_targets(
+                    on_courses_found=_notify_courses_found
+                )
                 cmids = [cmid for cmid, _ in discovered]
                 self.store.set_targets(chat_id, cmids, now_local())
 
@@ -552,6 +563,11 @@ class TelegramBotDaemon:
                         "⚠️ Tidak ditemukan modul attendance pada mata kuliah SPADA Anda.\n"
                         "Coba jalankan `/sync` nanti jika dosen baru menambahkan absensi.",
                     )
+                    if self.authorized_chat_id and not self._is_owner(chat_id):
+                        await self.send_message(
+                            self.authorized_chat_id,
+                            f"⚠️ Onboarding user `{chat_id}`: login berhasil, namun tidak ditemukan modul attendance.",
+                        )
                     return
 
                 matkul_lines = [f"• *{name}* (`{cmid}`)" for cmid, name in discovered]
@@ -561,6 +577,11 @@ class TelegramBotDaemon:
                     + "\n".join(matkul_lines)
                     + "\n\n⏳ Mengecek & mengisi presensi yang sedang dibuka...",
                 )
+                if self.authorized_chat_id and not self._is_owner(chat_id):
+                    await self.send_message(
+                        self.authorized_chat_id,
+                        f"📚 Onboarding user `{chat_id}`: ditemukan {len(discovered)} modul attendance.",
+                    )
 
                 for idx, target in enumerate(cmids):
                     if idx > 0:
@@ -595,6 +616,11 @@ class TelegramBotDaemon:
             except Exception as exc:
                 log(f"! Error onboarding user {chat_id}: {exc}")
                 await self.send_message(chat_id, f"⚠️ Terjadi kesalahan saat scan mata kuliah: `{exc}`")
+                if self.authorized_chat_id and not self._is_owner(chat_id):
+                    await self.send_message(
+                        self.authorized_chat_id,
+                        f"⚠️ Onboarding user `{chat_id}` gagal: `{exc}`",
+                    )
             finally:
                 await bot.close()
 
@@ -621,10 +647,20 @@ class TelegramBotDaemon:
                 return
 
             bot = SpadaBot(cfg)
+
+            async def _notify_courses_found(total: int) -> None:
+                est = max(5, total * 3)
+                await self.send_message(
+                    chat_id,
+                    f"🔎 *Login berhasil!* Ditemukan *{total} mata kuliah*, memindai modul absensi (~{est} detik)...",
+                )
+
             try:
                 await bot.start()
                 await bot.login()
-                discovered = await bot.discover_attendance_targets()
+                discovered = await bot.discover_attendance_targets(
+                    on_courses_found=_notify_courses_found
+                )
             except Exception as exc:
                 await self.send_message(chat_id, f"⚠️ Gagal scan mata kuliah: `{exc}`")
                 return

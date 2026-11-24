@@ -23,7 +23,7 @@ import os
 import random
 import re
 import sys
-from collections.abc import Iterable, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -526,7 +526,10 @@ class SpadaBot:
             return True
         return not (body and ERROR_PATTERN.search(body))
 
-    async def discover_attendance_targets(self) -> list[tuple[str, str]]:
+    async def discover_attendance_targets(
+        self,
+        on_courses_found: Callable[[int], Awaitable[None]] | None = None,
+    ) -> list[tuple[str, str]]:
         """Cari semua modul attendance di mata kuliah yang diikuti user."""
         assert self.page is not None
         page = self.page
@@ -548,20 +551,38 @@ class SpadaBot:
                             seen_courses.add(cid)
                             course_ids.append(cid)
 
-        await _collect_course_ids()
+        async def _wait_course_links(timeout_ms: int) -> None:
+            try:
+                await page.wait_for_function(
+                    """() => Array.from(document.querySelectorAll("a[href*='/course/view.php?id=']"))
+                        .some(a => {
+                            const m = (a.getAttribute('href') || '').match(/[?&]id=(\\d+)/);
+                            return m && m[1] !== '1';
+                        })""",
+                    timeout=timeout_ms,
+                )
+            except PlaywrightError:
+                pass
+
         await page.goto(f"{BASE_URL}/my/courses.php", wait_until="domcontentloaded")
-        try:
-            await page.wait_for_selector("a[href*='/course/view.php?id=']", timeout=2_000)
-        except PlaywrightError:
-            pass
-        await self._settle()
+        await _wait_course_links(8_000)
+        await self._settle(timeout_ms=2_000)
         await _collect_course_ids()
 
         if not course_ids:
-            for fallback_path in ("/my/", "/user/profile.php"):
-                await page.goto(f"{BASE_URL}{fallback_path}", wait_until="domcontentloaded")
-                await self._settle()
-                await _collect_course_ids(allow_course_param=True)
+            await page.goto(f"{BASE_URL}/my/", wait_until="domcontentloaded")
+            await _wait_course_links(4_000)
+            await self._settle(timeout_ms=2_000)
+            await _collect_course_ids(allow_course_param=True)
+
+        if not course_ids:
+            await page.goto(f"{BASE_URL}/user/profile.php", wait_until="domcontentloaded")
+            await self._settle(timeout_ms=2_500)
+            await _collect_course_ids(allow_course_param=True)
+
+        log(f"Ditemukan {len(course_ids)} mata kuliah, memindai modul attendance ...")
+        if on_courses_found is not None and course_ids:
+            await on_courses_found(len(course_ids))
 
         discovered: list[tuple[str, str]] = []
         seen_cmids: set[str] = set()
@@ -569,22 +590,26 @@ class SpadaBot:
 
         for idx, cid in enumerate(course_ids):
             if idx > 0 and gap_max > 0:
-                await asyncio.sleep(random.uniform(gap_min, gap_max))
-            await page.goto(f"{BASE_URL}/course/view.php?id={cid}", wait_until="domcontentloaded")
-            await self._settle()
-            course_name = await guess_course_name(page)
-            if any(skip in course_name.lower() for skip in self.config.skip_courses):
-                continue
+                await asyncio.sleep(random.uniform(min(gap_min, 0.5), min(gap_max, 1.5)))
+            try:
+                await page.goto(f"{BASE_URL}/course/view.php?id={cid}", wait_until="domcontentloaded")
+                await self._settle(timeout_ms=2_500)
+                course_name = await guess_course_name(page)
+                if any(skip in course_name.lower() for skip in self.config.skip_courses):
+                    continue
 
-            hrefs = await page.eval_on_selector_all(
-                "a[href]", "els => els.map(e => e.getAttribute('href') || '')"
-            )
-            for href in hrefs:
-                if m := re.search(r"/mod/attendance/view\.php\?(?:.*&)?id=(\d+)", href):
-                    cmid = m.group(1)
-                    if cmid not in seen_cmids:
-                        seen_cmids.add(cmid)
-                        discovered.append((cmid, course_name))
+                hrefs = await page.eval_on_selector_all(
+                    "a[href]", "els => els.map(e => e.getAttribute('href') || '')"
+                )
+                for href in hrefs:
+                    if m := re.search(r"/mod/attendance/view\.php\?(?:.*&)?id=(\d+)", href):
+                        cmid = m.group(1)
+                        if cmid not in seen_cmids:
+                            seen_cmids.add(cmid)
+                            discovered.append((cmid, course_name))
+            except PlaywrightError as exc:
+                log(f"! Gagal scan course {cid}: {exc}")
+                continue
 
         return discovered
 
@@ -893,11 +918,13 @@ class SpadaBot:
 
     # -- utilitas ----------------------------------------------------------
 
-    async def _settle(self) -> None:
+    async def _settle(self, timeout_ms: int | None = None) -> None:
         """Tunggu jaringan idle, tapi jangan menggagalkan flow bila timeout."""
         assert self.page is not None
         try:
-            await self.page.wait_for_load_state("networkidle", timeout=self.config.timeout_ms)
+            await self.page.wait_for_load_state(
+                "networkidle", timeout=timeout_ms or self.config.timeout_ms
+            )
         except PlaywrightTimeoutError:
             pass
 

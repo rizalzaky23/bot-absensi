@@ -438,7 +438,17 @@ async def main_test() -> int:
         await bot.start()
         await bot.context.route("**/*", discovery_handler)
         await bot.login()
-        discovered = await bot.discover_attendance_targets()
+        courses_found: list[int] = []
+
+        async def record_courses(count: int) -> None:
+            courses_found.append(count)
+
+        discovered = await bot.discover_attendance_targets(on_courses_found=record_courses)
+        check(
+            "discover_attendance_targets memanggil callback jumlah matkul",
+            courses_found == [2],
+            str(courses_found),
+        )
         check(
             "discover_attendance_targets menemukan cmid valid dan skip id=1",
             discovered == [("813469", "Basis Data")],

@@ -331,6 +331,35 @@ class TestTelegramBotDaemon(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first_payload.get("parse_mode"), "Markdown")
         self.assertNotIn("parse_mode", second_payload)
 
+    @patch.object(bot_tele, "SpadaBot")
+    @patch.object(bot_tele.TelegramBotDaemon, "send_message", new_callable=AsyncMock)
+    async def test_onboard_notifies_admin_on_zero_targets_and_generic_error(
+        self, mock_send, mock_bot_cls
+    ):
+        now = now_local()
+        self.daemon.store.upsert_credentials("777", "budi", "123210001", "pw", now)
+
+        mock_bot = MagicMock()
+        mock_bot.start = AsyncMock()
+        mock_bot.login = AsyncMock()
+        mock_bot.close = AsyncMock()
+        mock_bot.discover_attendance_targets = AsyncMock(return_value=[])
+        mock_bot_cls.return_value = mock_bot
+
+        await self.daemon._onboard_and_run_user("777")
+        sent_to_user = [c.args[1] for c in mock_send.call_args_list if c.args[0] == "777"]
+        sent_to_admin = [c.args[1] for c in mock_send.call_args_list if c.args[0] == "123456789"]
+        self.assertTrue(any("Tidak ditemukan modul attendance" in m for m in sent_to_user))
+        self.assertTrue(any("tidak ditemukan modul attendance" in m for m in sent_to_admin))
+
+        mock_send.reset_mock()
+        mock_bot.discover_attendance_targets = AsyncMock(side_effect=RuntimeError("boom"))
+        await self.daemon._onboard_and_run_user("777")
+        sent_to_user = [c.args[1] for c in mock_send.call_args_list if c.args[0] == "777"]
+        sent_to_admin = [c.args[1] for c in mock_send.call_args_list if c.args[0] == "123456789"]
+        self.assertTrue(any("boom" in m for m in sent_to_user))
+        self.assertTrue(any("Onboarding user `777` gagal" in m and "boom" in m for m in sent_to_admin))
+
 
 if __name__ == "__main__":
     unittest.main()
