@@ -405,6 +405,48 @@ async def main_test() -> int:
     finally:
         await bot.close()
 
+    print("\n11. Auto-discovery modul attendance (discover_attendance_targets)")
+    my_courses_html = """
+    <html><body>
+    <a href="https://spada.upnyk.ac.id/course/view.php?id=1">Site Home</a>
+    <a href="https://spada.upnyk.ac.id/course/view.php?id=101">Basis Data</a>
+    <a href="https://spada.upnyk.ac.id/course/view.php?id=102">Jaringan</a>
+    </body></html>
+    """
+    course_101_html = """
+    <html><body>
+    <h1>Basis Data</h1>
+    <a href="https://spada.upnyk.ac.id/mod/attendance/view.php?id=813469">Presensi</a>
+    </body></html>
+    """
+    course_102_html = "<html><body><h1>Jaringan</h1><p>Materi saja</p></body></html>"
+
+    async def discovery_handler(route):
+        url, method = route.request.url, route.request.method
+        if url.endswith("/login/index.php"):
+            return await fulfill(route, DASHBOARD_PAGE if method == "POST" else LOGIN_PAGE)
+        if "/my/courses.php" in url:
+            return await fulfill(route, my_courses_html)
+        if "course/view.php?id=101" in url:
+            return await fulfill(route, course_101_html)
+        if "course/view.php?id=102" in url:
+            return await fulfill(route, course_102_html)
+        return await fulfill(route, DASHBOARD_PAGE)
+
+    bot = SpadaBot(make_config(tmp, []))
+    try:
+        await bot.start()
+        await bot.context.route("**/*", discovery_handler)
+        await bot.login()
+        discovered = await bot.discover_attendance_targets()
+        check(
+            "discover_attendance_targets menemukan cmid valid dan skip id=1",
+            discovered == [("813469", "Basis Data")],
+            str(discovered),
+        )
+    finally:
+        await bot.close()
+
     print()
     if failures:
         print(f"{len(failures)} test GAGAL: {failures}")

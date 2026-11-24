@@ -7,3 +7,7 @@ artifacts/
 *.log
 .DS_Store
 .artifacts-test/
+*.db
+*.db-wal
+*.db-shm
+.bot_key

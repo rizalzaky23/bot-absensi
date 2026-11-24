@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
+import random
 import re
 import sys
 from collections.abc import Iterable, Sequence
@@ -211,6 +212,8 @@ class Config:
     user_agent: str = DEFAULT_USER_AGENT
     artifact_dir: Path = Path("artifacts")
     submit_delay_seconds: int = 0
+    submit_jitter_seconds: int = 0
+    target_gap_range: tuple[float, float] = (0.0, 0.0)
 
 
 @dataclass(slots=True)
@@ -523,6 +526,68 @@ class SpadaBot:
             return True
         return not (body and ERROR_PATTERN.search(body))
 
+    async def discover_attendance_targets(self) -> list[tuple[str, str]]:
+        """Cari semua modul attendance di mata kuliah yang diikuti user."""
+        assert self.page is not None
+        page = self.page
+        course_ids: list[str] = []
+        seen_courses: set[str] = set()
+
+        async def _collect_course_ids(allow_course_param: bool = False) -> None:
+            hrefs: list[str] = await page.eval_on_selector_all(
+                "a[href]", "els => els.map(e => e.getAttribute('href') || '')"
+            )
+            patterns = [r"/course/view\.php\?(?:.*&)?id=(\d+)"]
+            if allow_course_param:
+                patterns.append(r"[?&]course=(\d+)")
+            for href in hrefs:
+                for pat in patterns:
+                    if m := re.search(pat, href):
+                        cid = m.group(1)
+                        if cid != "1" and cid not in seen_courses:
+                            seen_courses.add(cid)
+                            course_ids.append(cid)
+
+        await _collect_course_ids()
+        await page.goto(f"{BASE_URL}/my/courses.php", wait_until="domcontentloaded")
+        try:
+            await page.wait_for_selector("a[href*='/course/view.php?id=']", timeout=2_000)
+        except PlaywrightError:
+            pass
+        await self._settle()
+        await _collect_course_ids()
+
+        if not course_ids:
+            for fallback_path in ("/my/", "/user/profile.php"):
+                await page.goto(f"{BASE_URL}{fallback_path}", wait_until="domcontentloaded")
+                await self._settle()
+                await _collect_course_ids(allow_course_param=True)
+
+        discovered: list[tuple[str, str]] = []
+        seen_cmids: set[str] = set()
+        gap_min, gap_max = self.config.target_gap_range
+
+        for idx, cid in enumerate(course_ids):
+            if idx > 0 and gap_max > 0:
+                await asyncio.sleep(random.uniform(gap_min, gap_max))
+            await page.goto(f"{BASE_URL}/course/view.php?id={cid}", wait_until="domcontentloaded")
+            await self._settle()
+            course_name = await guess_course_name(page)
+            if any(skip in course_name.lower() for skip in self.config.skip_courses):
+                continue
+
+            hrefs = await page.eval_on_selector_all(
+                "a[href]", "els => els.map(e => e.getAttribute('href') || '')"
+            )
+            for href in hrefs:
+                if m := re.search(r"/mod/attendance/view\.php\?(?:.*&)?id=(\d+)", href):
+                    cmid = m.group(1)
+                    if cmid not in seen_cmids:
+                        seen_cmids.add(cmid)
+                        discovered.append((cmid, course_name))
+
+        return discovered
+
     # -- langkah 4 & 5: deteksi sesi dan submit ----------------------------
 
     async def submit_attendance(self, target: str) -> AttendanceResult:
@@ -561,8 +626,14 @@ class SpadaBot:
             session_date = _extract_row_date(row_text)
             log(f"Sesi aktif: {row_text or 'form submit langsung'}")
             if self.config.submit_delay_seconds > 0:
-                log(f"Menunggu spare waktu {self.config.submit_delay_seconds}s sebelum submit ({course}) ...")
-                await asyncio.sleep(self.config.submit_delay_seconds)
+                jitter = (
+                    random.uniform(0, self.config.submit_jitter_seconds)
+                    if self.config.submit_jitter_seconds > 0
+                    else 0.0
+                )
+                wait_sec = self.config.submit_delay_seconds + jitter
+                log(f"Menunggu spare waktu {wait_sec:.1f}s sebelum submit ({course}) ...")
+                await asyncio.sleep(wait_sec)
 
             await link.click()
             await self._settle()
