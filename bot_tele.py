@@ -37,6 +37,17 @@ from main import (
 from user_store import UserRecord, UserStore, format_packages_text, get_package
 
 
+RELEASE_NOTICE_ID = "2026-11-26-fast-stagger-v1"
+RELEASE_NOTICE_TEXT = (
+    "📢 *Pembaruan Sistem Auto-Absen*\n\n"
+    "Bot telah diperbarui agar semua akun tetap sempat terabsen pada sesi kelas berdurasi singkat (misalnya 15 menit):\n"
+    "• Pengecekan otomatis kini berjalan setiap ~1,5 menit secara paralel.\n"
+    "• Jarak antar akun dipersingkat menjadi beberapa detik saja.\n"
+    "• Seluruh akun aktif ditargetkan terabsen dalam 3–5 menit pertama setelah sesi dibuka.\n\n"
+    "Tidak ada tindakan yang perlu Anda lakukan — bot otomatis menyesuaikan."
+)
+
+
 class TelegramBotDaemon:
     """Long polling Telegram Bot listener multi-user."""
 
@@ -46,14 +57,14 @@ class TelegramBotDaemon:
         self.authorized_chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
         self.api_base = os.getenv("TELEGRAM_API_BASE", "https://api.telegram.org").rstrip("/")
         self.auto_enabled = os.getenv("AUTO_ABSEN", "true").lower() in {"1", "true", "yes"}
-        self.check_interval_seconds = int(os.getenv("CHECK_INTERVAL_SECONDS", "300"))
+        self.check_interval_seconds = int(os.getenv("CHECK_INTERVAL_SECONDS", "90"))
         if not self.token:
             raise SystemExit("TELEGRAM_BOT_TOKEN belum diset di .env")
 
         self.store = UserStore(Path(os.getenv("DB_PATH", "bot_users.db")))
         self._pending_reg: dict[str, dict[str, str]] = {}
         self._user_locks: dict[str, asyncio.Lock] = {}
-        self._browser_sem = asyncio.Semaphore(int(os.getenv("MAX_CONCURRENT_BROWSERS", "2")))
+        self._browser_sem = asyncio.Semaphore(int(os.getenv("MAX_CONCURRENT_BROWSERS", "3")))
 
         default_qr = Path(__file__).resolve().parent / "assets" / "qris.jpg"
         self.payment_info = (
@@ -64,11 +75,17 @@ class TelegramBotDaemon:
         self.payment_qr_path = os.getenv("PAYMENT_QR_PATH", "").strip() or (
             str(default_qr) if default_qr.is_file() else ""
         )
-        self.user_gap_min = float(os.getenv("USER_GAP_MIN_SECONDS", "15"))
-        self.user_gap_max = float(os.getenv("USER_GAP_MAX_SECONDS", "45"))
-        self.target_gap_min = float(os.getenv("TARGET_GAP_MIN_SECONDS", "2"))
-        self.target_gap_max = float(os.getenv("TARGET_GAP_MAX_SECONDS", "5"))
-        self.submit_jitter = int(os.getenv("SUBMIT_JITTER_SECONDS", "25"))
+        self.user_gap_min = float(os.getenv("USER_GAP_MIN_SECONDS", "3"))
+        self.user_gap_max = float(os.getenv("USER_GAP_MAX_SECONDS", "8"))
+        self.target_gap_min = float(os.getenv("TARGET_GAP_MIN_SECONDS", "0.5"))
+        self.target_gap_max = float(os.getenv("TARGET_GAP_MAX_SECONDS", "1.5"))
+        self.auto_submit_delay = int(os.getenv("AUTO_SUBMIT_DELAY_SECONDS", "2"))
+        self.submit_jitter = int(os.getenv("SUBMIT_JITTER_SECONDS", "6"))
+
+    def _interval_label(self) -> str:
+        if self.check_interval_seconds % 60 == 0:
+            return f"{self.check_interval_seconds // 60} menit"
+        return f"{self.check_interval_seconds / 60:.1f} menit"
 
     def _is_owner(self, chat_id: str | int) -> bool:
         return bool(self.authorized_chat_id) and str(chat_id) == self.authorized_chat_id
@@ -255,7 +272,7 @@ class TelegramBotDaemon:
         msg = (
             "🤖 *Selamat Datang di Bot Presensi SPADA UPN!*\n\n"
             f"{header}\n"
-            f"(Cek otomatis tiap ~{self.check_interval_seconds // 60} menit)\n\n"
+            f"(Cek otomatis tiap ~{self._interval_label()})\n\n"
             "Perintah Akun & Pembayaran:\n"
             "• `/daftar` — Daftar / perbarui NIM & password SPADA\n"
             "• `/bayar` — Lihat paket (mingguan/bulanan/semester) & cara bayar\n"
@@ -531,7 +548,11 @@ class TelegramBotDaemon:
         lock = self._user_lock(chat_id)
         async with lock, self._browser_sem:
             try:
-                cfg = self._build_config_for_chat(chat_id, allow_empty_targets=True)
+                cfg = self._build_config_for_chat(
+                    chat_id,
+                    allow_empty_targets=True,
+                    submit_delay_seconds=self.auto_submit_delay,
+                )
             except Exception as exc:
                 await self.send_message(chat_id, f"⚠️ Gagal memuat akun: {exc}")
                 return
@@ -703,7 +724,7 @@ class TelegramBotDaemon:
                 await self.send_message(
                     chat_id,
                     f"🟢 *Auto-Absen DIAKTIFKAN*\n"
-                    f"Bot akan memeriksa SPADA otomatis setiap ~{self.check_interval_seconds // 60} menit "
+                    f"Bot akan memeriksa SPADA otomatis setiap ~{self._interval_label()} "
                     f"pada jam kuliah (06:45 - 18:30 WIB, Senin-Jumat). "
                     f"Jika sesi dibuka dosen, bot otomatis absen dan melapor ke sini.",
                 )
@@ -728,7 +749,7 @@ class TelegramBotDaemon:
         await self.send_message(
             chat_id,
             f"ℹ️ *Status Auto-Absen:* {status}\n"
-            f"• Interval periksa: tiap ~{self.check_interval_seconds // 60} menit\n"
+            f"• Interval periksa: tiap ~{self._interval_label()}\n"
             f"• Jam aktif: 06:45 - 18:30 WIB (Senin-Jumat)\n\n"
             f"Gunakan `/auto on` atau `/auto off` untuk mengubah.",
         )
@@ -740,7 +761,9 @@ class TelegramBotDaemon:
         async with lock, self._browser_sem:
             bot: SpadaBot | None = None
             try:
-                cfg = self._build_config_for_chat(chat_id)
+                cfg = self._build_config_for_chat(
+                    chat_id, submit_delay_seconds=self.auto_submit_delay
+                )
                 bot = SpadaBot(cfg)
                 await bot.start()
                 await bot.login()
@@ -748,66 +771,120 @@ class TelegramBotDaemon:
                 for idx, target in enumerate(cfg.attendance_targets):
                     if idx > 0:
                         await self._sleep_target_gap()
-                    url = resolve_target(target)
-                    assert bot.page is not None
-                    await bot.page.goto(url, wait_until="domcontentloaded")
-                    await bot._settle()
+                    try:
+                        url = resolve_target(target)
+                        assert bot.page is not None
+                        await bot.page.goto(url, wait_until="domcontentloaded")
+                        await bot._settle(timeout_ms=3_000)
 
-                    link, _ = await bot._find_active_session(bot.page)
-                    if link is None:
-                        continue
+                        link, _ = await bot._find_active_session(bot.page)
+                        if link is None:
+                            continue
 
-                    log(f"[Auto-Absen][{chat_id}] Sesi aktif ditemukan untuk {target}!")
-                    result = await bot.submit_attendance(target)
-                    if result.status == "success":
-                        log(f"[Auto-Absen][{chat_id}] Berhasil absen: {result.course}")
-                        await self.send_message(
-                            chat_id,
-                            TelegramNotifier.format_success(
-                                result.course,
-                                result.timestamp,
-                                "Presensi tercatat otomatis saat sesi kelas dibuka (auto-watcher)",
-                            ),
-                        )
-                    elif result.status == "failed":
-                        log(f"[Auto-Absen][{chat_id}] Gagal submit: {result.course} ({result.reason})")
-                        await self.send_message(
-                            chat_id,
-                            TelegramNotifier.format_failure(
-                                result.course, result.timestamp, result.reason
-                            ),
-                        )
+                        log(f"[Auto-Absen][{chat_id}] Sesi aktif ditemukan untuk {target}!")
+                        result = await bot.submit_attendance(target)
+                        if result.status == "success":
+                            log(f"[Auto-Absen][{chat_id}] Berhasil absen: {result.course}")
+                            await self.send_message(
+                                chat_id,
+                                TelegramNotifier.format_success(
+                                    result.course,
+                                    result.timestamp,
+                                    "Presensi tercatat otomatis saat sesi kelas dibuka (auto-watcher)",
+                                ),
+                            )
+                        elif result.status == "failed":
+                            log(f"[Auto-Absen][{chat_id}] Gagal submit: {result.course} ({result.reason})")
+                            await self.send_message(
+                                chat_id,
+                                TelegramNotifier.format_failure(
+                                    result.course, result.timestamp, result.reason
+                                ),
+                            )
+                    except Exception as exc:
+                        log(f"! Error cek target {target} user {chat_id}: {exc}")
             except Exception as exc:
                 log(f"! Error pada auto-watcher user {chat_id}: {exc}")
             finally:
                 if bot is not None:
                     await bot.close()
 
+    async def _run_auto_watcher_cycle(self, now: datetime) -> None:
+        """Jalankan satu siklus pengecekan untuk semua user aktif secara paralel berjeda singkat."""
+        candidate_ids: list[str] = []
+        if self.authorized_chat_id and self.auto_enabled:
+            candidate_ids.append(self.authorized_chat_id)
+        for u in self.store.list_active_users(now):
+            if u.chat_id != self.authorized_chat_id and u.auto_enabled and u.attendance_targets:
+                candidate_ids.append(u.chat_id)
+
+        if not candidate_ids:
+            return
+
+        random.shuffle(candidate_ids)
+
+        async def _run_staggered(uid: str, delay: float) -> None:
+            if delay > 0:
+                await asyncio.sleep(delay)
+            await self._run_auto_watcher_for_user(uid)
+
+        delay = 0.0
+        tasks: list[asyncio.Task[None]] = []
+        for idx, uid in enumerate(candidate_ids):
+            if idx > 0 and self.user_gap_max > 0:
+                delay += random.uniform(self.user_gap_min, self.user_gap_max)
+            tasks.append(asyncio.create_task(_run_staggered(uid, delay)))
+
+        await asyncio.gather(*tasks, return_exceptions=True)
+
     async def auto_watcher_loop(self) -> None:
         """Loop latar belakang untuk memeriksa dan mengisi absensi otomatis dengan jeda antar-user."""
         log(f"Auto-watcher berjalan (interval: ~{self.check_interval_seconds}s, auto={self.auto_enabled})")
-        # shortcut: sequential staggered auto-watcher (one user at a time); add worker pool if >30 active users
+        last_cycle_elapsed = 0.0
         while True:
-            jitter_wait = max(30.0, self.check_interval_seconds + random.uniform(-30, 60))
-            await asyncio.sleep(jitter_wait)
+            jitter_wait = max(30.0, self.check_interval_seconds + random.uniform(-10, 15))
+            await asyncio.sleep(max(30.0, jitter_wait - last_cycle_elapsed))
+            last_cycle_elapsed = 0.0
 
-            now = now_local()
-            minute_of_day = now.hour * 60 + now.minute
-            if now.weekday() > 4 or not (6 * 60 + 45 <= minute_of_day <= 18 * 60 + 30):
-                continue
+            try:
+                now = now_local()
+                minute_of_day = now.hour * 60 + now.minute
+                if now.weekday() > 4 or not (6 * 60 + 45 <= minute_of_day <= 18 * 60 + 30):
+                    continue
 
-            candidate_ids: list[str] = []
-            if self.authorized_chat_id and self.auto_enabled:
-                candidate_ids.append(self.authorized_chat_id)
-            for u in self.store.list_active_users(now):
-                if u.chat_id != self.authorized_chat_id and u.auto_enabled and u.attendance_targets:
-                    candidate_ids.append(u.chat_id)
+                started = asyncio.get_running_loop().time()
+                await self._run_auto_watcher_cycle(now)
+                last_cycle_elapsed = asyncio.get_running_loop().time() - started
+            except Exception as exc:
+                log(f"! Error pada loop auto-watcher: {exc}")
 
-            random.shuffle(candidate_ids)
-            for idx, uid in enumerate(candidate_ids):
-                if idx > 0 and self.user_gap_max > 0:
-                    await asyncio.sleep(random.uniform(self.user_gap_min, self.user_gap_max))
-                await self._run_auto_watcher_for_user(uid)
+    async def _send_release_notice(self) -> int:
+        """Kirim notifikasi pembaruan satu kali ke seluruh user terdaftar + pemilik."""
+        try:
+            if self.store.has_announcement(RELEASE_NOTICE_ID):
+                return 0
+
+            recipients: list[str] = []
+            if self.authorized_chat_id:
+                recipients.append(self.authorized_chat_id)
+            for u in self.store.list_users():
+                if u.chat_id not in recipients:
+                    recipients.append(u.chat_id)
+
+            sent = 0
+            for idx, cid in enumerate(recipients):
+                if idx > 0:
+                    await asyncio.sleep(0.1)
+                if await self.send_message(cid, RELEASE_NOTICE_TEXT):
+                    sent += 1
+
+            if not recipients or sent > 0:
+                self.store.mark_announcement_sent(RELEASE_NOTICE_ID, now_local())
+            log(f"Notifikasi pembaruan ({RELEASE_NOTICE_ID}) terkirim ke {sent}/{len(recipients)} user")
+            return sent
+        except Exception as exc:
+            log(f"! Gagal mengirim notifikasi pembaruan: {exc}")
+            return 0
 
     async def handle_list(self, chat_id: str | int) -> None:
         """Tampilkan daftar target attendance."""
@@ -1062,6 +1139,7 @@ class TelegramBotDaemon:
     async def run(self) -> None:
         """Loop long-polling getUpdates dan auto-watcher."""
         log(f"Bot Telegram aktif! Pemilik (exempt): {self.authorized_chat_id or '-'}")
+        asyncio.create_task(self._send_release_notice())
         asyncio.create_task(self.auto_watcher_loop())
         offset = 0
         timeout = 25

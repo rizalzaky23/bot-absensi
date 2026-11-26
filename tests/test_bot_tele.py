@@ -26,6 +26,7 @@ class TestTelegramBotDaemon(unittest.IsolatedAsyncioTestCase):
         os.environ["TARGET_GAP_MIN_SECONDS"] = "0"
         os.environ["TARGET_GAP_MAX_SECONDS"] = "0"
         os.environ["SUBMIT_DELAY_SECONDS"] = "0"
+        os.environ["AUTO_SUBMIT_DELAY_SECONDS"] = "0"
         os.environ["SUBMIT_JITTER_SECONDS"] = "0"
         self.daemon = bot_tele.TelegramBotDaemon()
 
@@ -359,6 +360,88 @@ class TestTelegramBotDaemon(unittest.IsolatedAsyncioTestCase):
         sent_to_admin = [c.args[1] for c in mock_send.call_args_list if c.args[0] == "123456789"]
         self.assertTrue(any("boom" in m for m in sent_to_user))
         self.assertTrue(any("Onboarding user `777` gagal" in m and "boom" in m for m in sent_to_admin))
+
+    async def test_auto_watcher_cycle_runs_users_concurrently_with_short_stagger(self):
+        now = now_local()
+        for uid, nim in (("701", "1001"), ("702", "1002"), ("703", "1003")):
+            self.daemon.store.upsert_credentials(uid, f"u{uid}", nim, "pw", now)
+            self.daemon.store.approve_payment(uid, now, package_override="mingguan")
+            self.daemon.store.set_targets(uid, ["101"], now)
+
+        self.daemon.user_gap_min = 0.02
+        self.daemon.user_gap_max = 0.03
+        self.daemon._browser_sem = asyncio.Semaphore(3)
+
+        starts: dict[str, float] = {}
+        loop = asyncio.get_running_loop()
+
+        async def fake_run(uid: str) -> None:
+            starts[uid] = loop.time()
+            await asyncio.sleep(0.15)
+
+        t0 = loop.time()
+        with patch.object(self.daemon, "_run_auto_watcher_for_user", side_effect=fake_run):
+            await self.daemon._run_auto_watcher_cycle(now)
+        elapsed = loop.time() - t0
+
+        self.assertEqual(set(starts), {"123456789", "701", "702", "703"})
+        self.assertLess(elapsed, 0.45)
+        ordered = sorted(starts.values())
+        self.assertGreater(ordered[-1] - ordered[0], 0.04)
+
+    @patch.object(bot_tele, "SpadaBot")
+    @patch.object(bot_tele.TelegramBotDaemon, "send_message", new_callable=AsyncMock)
+    async def test_auto_watcher_user_uses_auto_submit_delay_and_isolates_target_errors(
+        self, mock_send, mock_bot_cls
+    ):
+        now = now_local()
+        self.daemon.store.upsert_credentials("777", "budi", "123210001", "pw", now)
+        self.daemon.store.approve_payment("777", now, package_override="mingguan")
+        self.daemon.store.set_targets("777", ["101", "102"], now)
+
+        os.environ["SUBMIT_DELAY_SECONDS"] = "60"
+        self.daemon.auto_submit_delay = 2
+
+        mock_bot = MagicMock()
+        mock_bot.page = MagicMock()
+        mock_bot.page.goto = AsyncMock(side_effect=[RuntimeError("timeout 101"), None])
+        mock_bot.start = AsyncMock()
+        mock_bot.login = AsyncMock()
+        mock_bot.close = AsyncMock()
+        mock_bot._settle = AsyncMock()
+        mock_bot._find_active_session = AsyncMock(return_value=(MagicMock(), "Hari ini"))
+        mock_bot.submit_attendance = AsyncMock(
+            return_value=AttendanceResult("Basis Data", "success", "OK")
+        )
+        mock_bot_cls.return_value = mock_bot
+
+        await self.daemon._run_auto_watcher_for_user("777")
+
+        passed_cfg = mock_bot_cls.call_args[0][0]
+        self.assertEqual(passed_cfg.submit_delay_seconds, 2)
+        mock_bot.submit_attendance.assert_awaited_once_with("102")
+        mock_send.assert_awaited_once()
+        self.assertIn("Basis Data", mock_send.call_args[0][1])
+
+    @patch.object(bot_tele.TelegramBotDaemon, "send_message", new_callable=AsyncMock)
+    async def test_send_release_notice_sends_once_to_owner_and_all_users(self, mock_send):
+        mock_send.return_value = True
+        now = now_local()
+        self.daemon.store.upsert_credentials("701", "budi", "1001", "pw", now)
+        self.daemon.store.upsert_credentials("702", "ani", "1002", "pw", now)
+
+        first = await self.daemon._send_release_notice()
+        self.assertEqual(first, 3)
+        recipients = [c.args[0] for c in mock_send.call_args_list]
+        self.assertEqual(set(recipients), {"123456789", "701", "702"})
+        self.assertTrue(
+            all("Pembaruan Sistem Auto-Absen" in c.args[1] for c in mock_send.call_args_list)
+        )
+
+        mock_send.reset_mock()
+        second = await self.daemon._send_release_notice()
+        self.assertEqual(second, 0)
+        mock_send.assert_not_awaited()
 
 
 if __name__ == "__main__":

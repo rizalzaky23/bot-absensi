@@ -135,6 +135,10 @@ class UserStore:
                 created_at TEXT NOT NULL,
                 reviewed_at TEXT
             );
+            CREATE TABLE IF NOT EXISTS sent_announcements (
+                id TEXT PRIMARY KEY,
+                sent_at TEXT NOT NULL
+            );
             """
         )
         self._conn.commit()
@@ -343,3 +347,16 @@ class UserStore:
         )
         self._conn.commit()
         return True
+
+    def has_announcement(self, announcement_id: str) -> bool:
+        row = self._conn.execute(
+            "SELECT 1 FROM sent_announcements WHERE id = ?", (announcement_id,)
+        ).fetchone()
+        return row is not None
+
+    def mark_announcement_sent(self, announcement_id: str, now: datetime) -> None:
+        self._conn.execute(
+            "INSERT OR IGNORE INTO sent_announcements (id, sent_at) VALUES (?, ?)",
+            (announcement_id, now.isoformat()),
+        )
+        self._conn.commit()
