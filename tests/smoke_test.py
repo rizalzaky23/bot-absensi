@@ -382,6 +382,18 @@ async def main_test() -> int:
     result = await run_scenario(build_mock(REAL_SPADA_TODAY_DONE_PAGE), ["813469"], tmp)
     check("hari ini Present terdeteksi already", result.status == "already", f"status={result.status}")
 
+    bot = SpadaBot(make_config(tmp, ["813469"]))
+    try:
+        await bot.start()
+        await bot.context.route("**/*", real_spada_handler)
+        await bot.login()
+        assert bot.page is not None
+        await bot.page.goto(main.resolve_target("813469"), wait_until="domcontentloaded")
+        result = await bot.submit_attendance("813469", reload=False)
+        check("submit_attendance(reload=False) berhasil", result.status == "success", f"status={result.status} reason={result.reason}")
+    finally:
+        await bot.close()
+
     print("\n10. Filter sesi jadwal hari ini (get_today_sessions)")
     bot = SpadaBot(make_config(tmp, ["813469"]))
     try:

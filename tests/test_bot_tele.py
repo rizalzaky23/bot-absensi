@@ -419,9 +419,21 @@ class TestTelegramBotDaemon(unittest.IsolatedAsyncioTestCase):
 
         passed_cfg = mock_bot_cls.call_args[0][0]
         self.assertEqual(passed_cfg.submit_delay_seconds, 2)
-        mock_bot.submit_attendance.assert_awaited_once_with("102")
+        mock_bot.submit_attendance.assert_awaited_once_with("102", reload=False)
         mock_send.assert_awaited_once()
         self.assertIn("Basis Data", mock_send.call_args[0][1])
+
+    def test_in_active_hours_includes_weekends_and_evening(self):
+        from datetime import datetime
+        from main import WIB_TZ
+
+        # 2026-11-28 = Sabtu, 2026-11-29 = Minggu
+        self.assertTrue(bot_tele.TelegramBotDaemon._in_active_hours(datetime(2026, 11, 28, 8, 0, tzinfo=WIB_TZ)))
+        self.assertTrue(bot_tele.TelegramBotDaemon._in_active_hours(datetime(2026, 11, 29, 12, 0, tzinfo=WIB_TZ)))
+        self.assertTrue(bot_tele.TelegramBotDaemon._in_active_hours(datetime(2026, 11, 30, 6, 0, tzinfo=WIB_TZ)))
+        self.assertTrue(bot_tele.TelegramBotDaemon._in_active_hours(datetime(2026, 11, 30, 22, 0, tzinfo=WIB_TZ)))
+        self.assertFalse(bot_tele.TelegramBotDaemon._in_active_hours(datetime(2026, 11, 28, 5, 59, tzinfo=WIB_TZ)))
+        self.assertFalse(bot_tele.TelegramBotDaemon._in_active_hours(datetime(2026, 11, 28, 22, 1, tzinfo=WIB_TZ)))
 
     @patch.object(bot_tele.TelegramBotDaemon, "send_message", new_callable=AsyncMock)
     async def test_send_release_notice_sends_once_to_owner_and_all_users(self, mock_send):

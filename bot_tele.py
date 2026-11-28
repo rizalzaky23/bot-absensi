@@ -37,13 +37,13 @@ from main import (
 from user_store import UserRecord, UserStore, format_packages_text, get_package
 
 
-RELEASE_NOTICE_ID = "2026-11-26-fast-stagger-v1"
+RELEASE_NOTICE_ID = "2026-11-28-daily-fast-v2"
 RELEASE_NOTICE_TEXT = (
     "📢 *Pembaruan Sistem Auto-Absen*\n\n"
-    "Bot telah diperbarui agar semua akun tetap sempat terabsen pada sesi kelas berdurasi singkat (misalnya 15 menit):\n"
-    "• Pengecekan otomatis kini berjalan setiap ~1,5 menit secara paralel.\n"
-    "• Jarak antar akun dipersingkat menjadi beberapa detik saja.\n"
-    "• Seluruh akun aktif ditargetkan terabsen dalam 3–5 menit pertama setelah sesi dibuka.\n\n"
+    "Bot telah diperbarui agar presensi tetap berjalan di akhir pekan dan terisi lebih cepat:\n"
+    "• Auto-absen kini aktif *setiap hari (Senin–Minggu, 06:00–22:00 WIB)*, termasuk kuliah pengganti hari Sabtu/Minggu.\n"
+    "• Pengecekan otomatis dipercepat menjadi setiap ~1 menit secara paralel.\n"
+    "• Target pengisian presensi di bawah 3 menit (maksimal 5 menit) setelah sesi dibuka dosen.\n\n"
     "Tidak ada tindakan yang perlu Anda lakukan — bot otomatis menyesuaikan."
 )
 
@@ -57,7 +57,7 @@ class TelegramBotDaemon:
         self.authorized_chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
         self.api_base = os.getenv("TELEGRAM_API_BASE", "https://api.telegram.org").rstrip("/")
         self.auto_enabled = os.getenv("AUTO_ABSEN", "true").lower() in {"1", "true", "yes"}
-        self.check_interval_seconds = int(os.getenv("CHECK_INTERVAL_SECONDS", "90"))
+        self.check_interval_seconds = int(os.getenv("CHECK_INTERVAL_SECONDS", "60"))
         if not self.token:
             raise SystemExit("TELEGRAM_BOT_TOKEN belum diset di .env")
 
@@ -75,12 +75,12 @@ class TelegramBotDaemon:
         self.payment_qr_path = os.getenv("PAYMENT_QR_PATH", "").strip() or (
             str(default_qr) if default_qr.is_file() else ""
         )
-        self.user_gap_min = float(os.getenv("USER_GAP_MIN_SECONDS", "3"))
-        self.user_gap_max = float(os.getenv("USER_GAP_MAX_SECONDS", "8"))
-        self.target_gap_min = float(os.getenv("TARGET_GAP_MIN_SECONDS", "0.5"))
-        self.target_gap_max = float(os.getenv("TARGET_GAP_MAX_SECONDS", "1.5"))
+        self.user_gap_min = float(os.getenv("USER_GAP_MIN_SECONDS", "1"))
+        self.user_gap_max = float(os.getenv("USER_GAP_MAX_SECONDS", "3"))
+        self.target_gap_min = float(os.getenv("TARGET_GAP_MIN_SECONDS", "0.2"))
+        self.target_gap_max = float(os.getenv("TARGET_GAP_MAX_SECONDS", "0.6"))
         self.auto_submit_delay = int(os.getenv("AUTO_SUBMIT_DELAY_SECONDS", "2"))
-        self.submit_jitter = int(os.getenv("SUBMIT_JITTER_SECONDS", "6"))
+        self.submit_jitter = int(os.getenv("SUBMIT_JITTER_SECONDS", "4"))
 
     def _interval_label(self) -> str:
         if self.check_interval_seconds % 60 == 0:
@@ -725,7 +725,7 @@ class TelegramBotDaemon:
                     chat_id,
                     f"🟢 *Auto-Absen DIAKTIFKAN*\n"
                     f"Bot akan memeriksa SPADA otomatis setiap ~{self._interval_label()} "
-                    f"pada jam kuliah (06:45 - 18:30 WIB, Senin-Jumat). "
+                    f"pada jam kuliah (06:00 - 22:00 WIB, setiap hari). "
                     f"Jika sesi dibuka dosen, bot otomatis absen dan melapor ke sini.",
                 )
                 return
@@ -750,7 +750,7 @@ class TelegramBotDaemon:
             chat_id,
             f"ℹ️ *Status Auto-Absen:* {status}\n"
             f"• Interval periksa: tiap ~{self._interval_label()}\n"
-            f"• Jam aktif: 06:45 - 18:30 WIB (Senin-Jumat)\n\n"
+            f"• Jam aktif: 06:00 - 22:00 WIB (Setiap hari)\n\n"
             f"Gunakan `/auto on` atau `/auto off` untuk mengubah.",
         )
 
@@ -775,14 +775,14 @@ class TelegramBotDaemon:
                         url = resolve_target(target)
                         assert bot.page is not None
                         await bot.page.goto(url, wait_until="domcontentloaded")
-                        await bot._settle(timeout_ms=3_000)
+                        await bot._settle(timeout_ms=1_000)
 
                         link, _ = await bot._find_active_session(bot.page)
                         if link is None:
                             continue
 
                         log(f"[Auto-Absen][{chat_id}] Sesi aktif ditemukan untuk {target}!")
-                        result = await bot.submit_attendance(target)
+                        result = await bot.submit_attendance(target, reload=False)
                         if result.status == "success":
                             log(f"[Auto-Absen][{chat_id}] Berhasil absen: {result.course}")
                             await self.send_message(
@@ -837,19 +837,28 @@ class TelegramBotDaemon:
 
         await asyncio.gather(*tasks, return_exceptions=True)
 
+    @staticmethod
+    def _in_active_hours(now: datetime) -> bool:
+        minute_of_day = now.hour * 60 + now.minute
+        return 6 * 60 <= minute_of_day <= 22 * 60
+
     async def auto_watcher_loop(self) -> None:
         """Loop latar belakang untuk memeriksa dan mengisi absensi otomatis dengan jeda antar-user."""
         log(f"Auto-watcher berjalan (interval: ~{self.check_interval_seconds}s, auto={self.auto_enabled})")
         last_cycle_elapsed = 0.0
+        first_run = True
         while True:
-            jitter_wait = max(30.0, self.check_interval_seconds + random.uniform(-10, 15))
-            await asyncio.sleep(max(30.0, jitter_wait - last_cycle_elapsed))
+            if first_run:
+                first_run = False
+                await asyncio.sleep(3.0)
+            else:
+                jitter_wait = max(20.0, self.check_interval_seconds + random.uniform(-5, 5))
+                await asyncio.sleep(max(5.0, jitter_wait - last_cycle_elapsed))
             last_cycle_elapsed = 0.0
 
             try:
                 now = now_local()
-                minute_of_day = now.hour * 60 + now.minute
-                if now.weekday() > 4 or not (6 * 60 + 45 <= minute_of_day <= 18 * 60 + 30):
+                if not self._in_active_hours(now):
                     continue
 
                 started = asyncio.get_running_loop().time()

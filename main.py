@@ -368,6 +368,9 @@ class TelegramNotifier:
         try:
             async with httpx.AsyncClient(timeout=self._timeout) as client:
                 response = await client.post(url, json=payload)
+                if response.status_code == 400:
+                    fallback = {k: v for k, v in payload.items() if k != "parse_mode"}
+                    response = await client.post(url, json=fallback)
         except httpx.HTTPError as exc:
             log(f"! Gagal kirim notifikasi Telegram: {exc}")
             return False
@@ -615,12 +618,13 @@ class SpadaBot:
 
     # -- langkah 4 & 5: deteksi sesi dan submit ----------------------------
 
-    async def submit_attendance(self, target: str) -> AttendanceResult:
+    async def submit_attendance(self, target: str, reload: bool = True) -> AttendanceResult:
         """
         Buka halaman attendance, deteksi sesi aktif, lalu isi "Hadir".
 
         Args:
             target: cmid atau URL penuh modul attendance.
+            reload: False bila halaman target sudah dibuka sebelumnya oleh caller.
 
         Returns:
             AttendanceResult dengan status success/already/not_open/failed.
@@ -632,9 +636,10 @@ class SpadaBot:
         course = f"cmid={target}"
 
         try:
-            log(f"Membuka {url}")
-            await page.goto(url, wait_until="domcontentloaded")
-            await self._settle()
+            if reload:
+                log(f"Membuka {url}")
+                await page.goto(url, wait_until="domcontentloaded")
+                await self._settle()
 
             course = await guess_course_name(page)
             if any(skip in course.lower() for skip in self.config.skip_courses):
@@ -722,9 +727,10 @@ class SpadaBot:
                 if not text or text.lower().startswith(("date", "tanggal")):
                     continue
                 row_text = text
-                link = await first_visible(row, SEL_SUBMIT_LINK, timeout=0.4)
-                if link:
-                    return link, text
+                if await row.locator("a").count():
+                    link = await first_visible(row, SEL_SUBMIT_LINK, timeout=0.4)
+                    if link:
+                        return link, text
 
         # Fallback: beberapa halaman langsung menampilkan form/link submit attendance.
         link = await first_visible(page, SEL_SUBMIT_LINK, timeout=1.0)
